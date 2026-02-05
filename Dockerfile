@@ -1,16 +1,20 @@
 FROM dailyco/pipecat-base:latest
 
-# Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
-
-# Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
 
-# Install the project's dependencies using the lockfile and settings
+WORKDIR /app
+
+# Copy only pyproject first (enables Docker layer caching)
+COPY pyproject.toml ./
+
+# Generate lockfile inside the build (works even if repo has no uv.lock)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv lock
+
+# Install deps from the generated lockfile
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
-# Copy the application code
-COPY ./bot.py bot.py
+# Copy app code
+COPY ./bot.py ./bot.py
