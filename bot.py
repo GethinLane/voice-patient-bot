@@ -47,18 +47,13 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-# (3) add a simple post-LLM processor to limit responses
-from pipecat.processors.base_processor import BaseProcessor
-
-try:
-    # Some pipecat versions expose a TextFrame
-    from pipecat.frames.frames import TextFrame  # type: ignore
-except Exception:
-    TextFrame = None  # fallback to duck-typing below
-
 logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
+
+# Version stamp to confirm the deployed image is actually updated
+BOT_VERSION = "2026-02-05-case-selection-fix-no-baseprocessor"
+logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 
 # ----------------------- AIRTABLE HELPERS -----------------------
@@ -191,62 +186,6 @@ def extract_opening_sentence(system_text: str) -> str:
     return opening
 
 
-# ----------------------- (3) 1–2 sentence limiter -----------------------
-
-EXPAND_TRIGGERS = (
-    "tell me more",
-    "go on",
-    "in more detail",
-    "expand",
-    "talk me through",
-    "can you explain",
-    "describe",
-)
-
-def split_sentences(text: str):
-    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
-    return [p.strip() for p in parts if p and p.strip()]
-
-
-class TwoSentenceLimiter(BaseProcessor):
-    """
-    Post-LLM processor: trims assistant output to max 2 sentences unless user explicitly asks to expand.
-    """
-
-    def __init__(self, context: LLMContext):
-        super().__init__()
-        self.context = context
-
-    async def process_frame(self, frame, direction):
-        is_text_frame = (TextFrame is not None and isinstance(frame, TextFrame)) or hasattr(frame, "text")
-        if not is_text_frame:
-            return frame
-
-        # Only apply on the way out (LLM -> TTS) when direction info exists
-        try:
-            if getattr(direction, "name", "").upper() not in ("DOWNSTREAM", "OUT", "OUTPUT"):
-                return frame
-        except Exception:
-            pass
-
-        # Check last user message for expansion request
-        last_user = ""
-        for m in reversed(self.context.messages):
-            if m.get("role") == "user":
-                last_user = (m.get("content") or "").lower()
-                break
-
-        if any(t in last_user for t in EXPAND_TRIGGERS):
-            return frame
-
-        text = getattr(frame, "text", "") or ""
-        sents = split_sentences(text)
-        if len(sents) > 2:
-            setattr(frame, "text", " ".join(sents[:2]).strip())
-
-        return frame
-
-
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting bot")
 
@@ -257,48 +196,49 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
     )
-    
+
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
     # --- Case selection (from session body, fallback to env) ---
+    # NOTE: runner_args.body is populated when you start the session with:
+    # { "body": { "caseId": 81 } }
     body = getattr(runner_args, "body", None) or {}
-    logger.info(f"📥 DEBUG runner_args.body = {body}")
+    logger.info(f"📥 DEBUG runner_args.body={body}")
 
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
     logger.info(f"📘 Using case_id={case_id} (session body={body})")
 
-
-    # Build system prompt from Airtable at startup (or you can move this into on_client_connected)
+    # Build system prompt from Airtable at startup
     try:
         system_text = fetch_case_system_text(case_id)
         logger.info(f"✅ Loaded Airtable system prompt for Case {case_id}")
     except Exception as e:
-        # Fail-safe: don't start with a broken / empty system prompt
         logger.error(f"❌ Failed to load Airtable case {case_id}: {e}")
         system_text = (
             "CRITICAL: Airtable case failed to load. "
             "Tell the clinician you haven't been given the case details."
         )
 
-    # (2) pull out the opening sentence so we can force it on connect
+    # Pull out opening sentence so we can force it on connect
     opening_sentence = extract_opening_sentence(system_text)
 
-    # (1) disclosure policy + examples (stronger and explicit)
+    # Disclosure policy (stronger and explicit)
     disclosure_policy = """
 DISCLOSURE POLICY (follow exactly):
 
 Definitions:
 - "Direct question" = clinician asks specifically about a topic (e.g. chest pain, smoking, meds, allergies, family history, mood, ICE, etc.)
-- "Vague/open question" = clinician asks broad prompts (e.g. "general health?", "tell me more", "anything else?", "how have you been?")
+- "Vague/open question" = clinician asks broad prompts (e.g. "general health?", "anything else?", "how have you been?")
 
 Rules:
 1) Default reply length is 1–2 sentences. No lists. No multi-part dumping.
 2) For vague/open questions AFTER the opening question:
-   - Give a brief general answer (1 sentence)
+   - Give a brief general answer (1 short sentence)
    - Then ask a narrowing question: "What would you like to know about specifically?"
    - Do NOT volunteer detailed PMHx / social / family / ICE / extra symptoms.
 3) Only reveal information from "DIVULGE ONLY IF ASKED" when a direct question matches it.
 4) "DIVULGE FREELY" must still be relevant to the specific question. Do not dump the whole section.
+5) If the clinician reassures you about something, do not re-introduce that worry unless asked again.
 
 Examples:
 - Clinician: "How is your general health?"
@@ -320,9 +260,9 @@ Behaviour rules:
 - Do NOT lecture or explain unless explicitly asked.
 - Do NOT give medical advice unless the clinician asks for your understanding.
 - Answer briefly by default; expand only if prompted.
-- Avoid long monologues
-- Show mild anxiety when discussing serious symptoms
-- Express guilt or worry only when relevant to the case
+- Avoid long monologues.
+- Show mild anxiety when discussing serious symptoms.
+- Express guilt or worry only when relevant to the case.
 - If unsure, say so plainly (e.g. "I'm not sure", "I don't remember").
 - Stay emotionally consistent with the case.
 - Never mention you are an AI, model, or simulation.
@@ -332,14 +272,11 @@ Behaviour rules:
         },
         {
             "role": "system",
-            "content": system_text,  # ← Airtable case details + hard rules
+            "content": system_text,  # Airtable case details + hard rules
         },
     ]
 
     context = LLMContext(messages)
-
-    # (3) attach limiter
-    limiter = TwoSentenceLimiter(context)
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -357,7 +294,6 @@ Behaviour rules:
             stt,
             user_aggregator,
             llm,
-            limiter,  # (3) enforce 1–2 sentences
             tts,
             transport.output(),
             assistant_aggregator,
@@ -376,7 +312,7 @@ Behaviour rules:
     async def on_client_connected(transport, client):
         logger.info("Client connected")
 
-        # (2) opening: ONLY the opening sentence, then stop
+        # Opening: ONLY the opening sentence, then stop
         if opening_sentence:
             messages.append(
                 {
