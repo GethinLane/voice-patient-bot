@@ -6,6 +6,8 @@
 
 import os
 import re
+import json
+import threading
 import requests
 
 from dotenv import load_dotenv
@@ -48,14 +50,13 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-BOT_VERSION = "2026-02-05-transcript-submit-v1"
+BOT_VERSION = "2026-02-05-transcript-submit-v2"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
-GRADING_SUBMIT_URL = os.getenv(
-    "GRADING_SUBMIT_URL",
-    "https://voice-patient-web.vercel.app/api/submit-transcript",
-)
+# Recommended: set in Pipecat secret set to avoid accidental defaults.
+GRADING_SUBMIT_URL = os.getenv("GRADING_SUBMIT_URL", "").strip() or "https://voice-patient-web.vercel.app/api/submit-transcript"
+logger.info(f"✅ GRADING_SUBMIT_URL={GRADING_SUBMIT_URL}")
 
 
 # ----------------------- AIRTABLE HELPERS -----------------------
@@ -189,7 +190,7 @@ def extract_opening_sentence(system_text: str) -> str:
 def build_transcript_from_context(context: LLMContext):
     """
     Build transcript (user+assistant only) from the LLM context.
-    This is called ONLY on disconnect to avoid any runtime overhead.
+    Called ONLY on disconnect to avoid any runtime overhead.
     """
     out = []
     for m in context.messages:
@@ -201,6 +202,20 @@ def build_transcript_from_context(context: LLMContext):
             continue
         out.append({"role": role, "text": text})
     return out
+
+
+def _submit_grading_in_background(url: str, payload: dict):
+    """
+    Fire-and-forget transcript submit so we do NOT block Pipecat shutdown.
+    Uses requests in a background thread.
+    """
+    try:
+        logger.info(f"📤 [BG] POST {url}")
+        logger.info(f"📤 [BG] payload preview: {json.dumps({k: payload[k] for k in payload if k != 'transcript'}, ensure_ascii=False)[:400]}")
+        r = requests.post(url, json=payload, timeout=60)
+        logger.info(f"📤 [BG] response: {r.status_code} {r.text[:400]}")
+    except Exception as e:
+        logger.error(f"❌ [BG] submit failed: {e}")
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
@@ -339,21 +354,31 @@ Behaviour rules:
         # Build transcript ONLY now (zero cost during live session)
         transcript = build_transcript_from_context(context)
 
+        # IMPORTANT: log session id so you can compare with browser polling id
         session_id = getattr(runner_args, "session_id", None)
-        payload = {
-            "sessionId": session_id,
-            "caseId": case_id,
-            "userId": user_id,
-            "transcript": transcript,
-        }
+        logger.info(f"🧾 Transcript built: session_id={session_id} case_id={case_id} turns={len(transcript)}")
 
-        # Submit transcript for grading (only after session ends)
-        try:
-            logger.info(f"📤 Submitting transcript for grading: sessionId={session_id} caseId={case_id}")
-            r = requests.post(GRADING_SUBMIT_URL, json=payload, timeout=30)
-            logger.info(f"📤 Grading submit response: {r.status_code} {r.text[:300]}")
-        except Exception as e:
-            logger.error(f"❌ Failed to submit transcript for grading: {e}")
+        if not transcript:
+            logger.warning("⚠️ Transcript is empty; skipping grading submit.")
+        else:
+            payload = {
+                "sessionId": session_id,
+                "caseId": case_id,
+                "userId": user_id,
+                "transcript": transcript,
+            }
+
+            # Fire-and-forget background submit (so we don't hang teardown)
+            try:
+                logger.info(f"📤 Queueing transcript submit to {GRADING_SUBMIT_URL}")
+                th = threading.Thread(
+                    target=_submit_grading_in_background,
+                    args=(GRADING_SUBMIT_URL, payload),
+                    daemon=True,
+                )
+                th.start()
+            except Exception as e:
+                logger.error(f"❌ Failed to start background submit thread: {e}")
 
         await task.cancel()
 
