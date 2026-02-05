@@ -197,7 +197,30 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "Tell the clinician you haven't been given the case details."
         )
 
-    messages = [{"role": "system", "content": system_text}]
+    messages = [
+    {
+        "role": "system",
+        "content": """
+You are simulating a real patient in a clinical consultation.
+
+Behaviour rules:
+- Respond naturally, conversationally, and realistically.
+- Do NOT lecture or explain unless explicitly asked.
+- Do NOT give medical advice unless the clinician asks for your understanding.
+- Answer briefly by default; expand only if prompted.
+- Avoid long monologues
+- Show mild anxiety when discussing serious symptoms
+- Express guilt or worry only when relevant to the case
+- If unsure, say so plainly (e.g. "I'm not sure", "I don't remember").
+- Stay emotionally consistent with the case.
+- Never mention you are an AI, model, or simulation.
+"""
+    },
+    {
+        "role": "system",
+        "content": system_text  # ← Airtable case details + hard rules
+    }
+]
 
     context = LLMContext(messages)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
