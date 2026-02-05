@@ -260,8 +260,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # --- Case selection (simple for now) ---
-    case_id = int(os.getenv("CASE_ID", "1"))
+# --- Case selection (from session body, fallback to env) ---
+body = getattr(runner_args, "body", None) or {}
+case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
+
+logger.info(f"📘 Using case_id={case_id} (session body={body})")
+
 
     # Build system prompt from Airtable at startup (or you can move this into on_client_connected)
     try:
