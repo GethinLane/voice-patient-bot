@@ -5,6 +5,7 @@
 #
 
 import os
+import re
 import requests
 
 from dotenv import load_dotenv
@@ -46,6 +47,15 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
+# (3) add a simple post-LLM processor to limit responses
+from pipecat.processors.base_processor import BaseProcessor
+
+try:
+    # Some pipecat versions expose a TextFrame
+    from pipecat.frames.frames import TextFrame  # type: ignore
+except Exception:
+    TextFrame = None  # fallback to duck-typing below
+
 logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
@@ -59,6 +69,7 @@ def _assert_env(name: str) -> str:
         raise RuntimeError(f"Missing required env var: {name}")
     return val
 
+
 def _combine_field_across_rows(records, field_name: str) -> str:
     parts = []
     for r in records:
@@ -70,6 +81,7 @@ def _combine_field_across_rows(records, field_name: str) -> str:
         if t:
             parts.append(t)
     return "\n\n".join(parts)
+
 
 def _build_system_text_from_case(records) -> str:
     opening = _combine_field_across_rows(records, "Opening Sentence")
@@ -128,11 +140,6 @@ REACTION / AFFECT:
 
     return f"{case}\n\n{rules}"
 
-def _airtable_get_json(url: str, api_key: str) -> dict:
-    r = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
-    if not r.ok:
-        raise RuntimeError(f"Airtable error {r.status_code}: {r.text[:400]}")
-    return r.json()
 
 def fetch_case_system_text(case_id: int) -> str:
     api_key = _assert_env("AIRTABLE_API_KEY")
@@ -146,9 +153,8 @@ def fetch_case_system_text(case_id: int) -> str:
         params = {"pageSize": "100"}
         if offset:
             params["offset"] = offset
-        # Airtable REST: /v0/{baseId}/{tableName}
         url = f"https://api.airtable.com/v0/{base_id}/{requests.utils.quote(table_name)}"
-        # requests will encode params separately
+
         resp = requests.get(
             url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -167,6 +173,78 @@ def fetch_case_system_text(case_id: int) -> str:
         raise RuntimeError(f"No records found in Airtable table '{table_name}'")
 
     return _build_system_text_from_case(records)
+
+
+def extract_opening_sentence(system_text: str) -> str:
+    """
+    Extract the OPENING SENTENCE block from the Airtable-built system_text.
+    """
+    m = re.search(
+        r"OPENING SENTENCE:\s*(.*?)(?:\n\s*\n|DIVULGE FREELY:)",
+        system_text,
+        flags=re.S | re.I,
+    )
+    if not m:
+        return ""
+    opening = m.group(1).strip()
+    opening = re.sub(r"\s+\n\s+", " ", opening).strip()
+    return opening
+
+
+# ----------------------- (3) 1–2 sentence limiter -----------------------
+
+EXPAND_TRIGGERS = (
+    "tell me more",
+    "go on",
+    "in more detail",
+    "expand",
+    "talk me through",
+    "can you explain",
+    "describe",
+)
+
+def split_sentences(text: str):
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+class TwoSentenceLimiter(BaseProcessor):
+    """
+    Post-LLM processor: trims assistant output to max 2 sentences unless user explicitly asks to expand.
+    """
+
+    def __init__(self, context: LLMContext):
+        super().__init__()
+        self.context = context
+
+    async def process_frame(self, frame, direction):
+        is_text_frame = (TextFrame is not None and isinstance(frame, TextFrame)) or hasattr(frame, "text")
+        if not is_text_frame:
+            return frame
+
+        # Only apply on the way out (LLM -> TTS) when direction info exists
+        try:
+            if getattr(direction, "name", "").upper() not in ("DOWNSTREAM", "OUT", "OUTPUT"):
+                return frame
+        except Exception:
+            pass
+
+        # Check last user message for expansion request
+        last_user = ""
+        for m in reversed(self.context.messages):
+            if m.get("role") == "user":
+                last_user = (m.get("content") or "").lower()
+                break
+
+        if any(t in last_user for t in EXPAND_TRIGGERS):
+            return frame
+
+        text = getattr(frame, "text", "") or ""
+        sents = split_sentences(text)
+        if len(sents) > 2:
+            setattr(frame, "text", " ".join(sents[:2]).strip())
+
+        return frame
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
@@ -197,10 +275,39 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "Tell the clinician you haven't been given the case details."
         )
 
+    # (2) pull out the opening sentence so we can force it on connect
+    opening_sentence = extract_opening_sentence(system_text)
+
+    # (1) disclosure policy + examples (stronger and explicit)
+    disclosure_policy = """
+DISCLOSURE POLICY (follow exactly):
+
+Definitions:
+- "Direct question" = clinician asks specifically about a topic (e.g. chest pain, smoking, meds, allergies, family history, mood, ICE, etc.)
+- "Vague/open question" = clinician asks broad prompts (e.g. "general health?", "tell me more", "anything else?", "how have you been?")
+
+Rules:
+1) Default reply length is 1–2 sentences. No lists. No multi-part dumping.
+2) For vague/open questions AFTER the opening question:
+   - Give a brief general answer (1 sentence)
+   - Then ask a narrowing question: "What would you like to know about specifically?"
+   - Do NOT volunteer detailed PMHx / social / family / ICE / extra symptoms.
+3) Only reveal information from "DIVULGE ONLY IF ASKED" when a direct question matches it.
+4) "DIVULGE FREELY" must still be relevant to the specific question. Do not dump the whole section.
+
+Examples:
+- Clinician: "How is your general health?"
+  Patient: "Mostly okay, just a bit worried because of the main problem. What would you like to know about specifically?"
+- Clinician: "Do you smoke?"
+  Patient: "<answer from Social History in 1 sentence>"
+- Clinician: "Any other symptoms?"
+  Patient: "Not that I can think of. Is there something you’re particularly looking for?"
+""".strip()
+
     messages = [
-    {
-        "role": "system",
-        "content": """
+        {
+            "role": "system",
+            "content": f"""
 You are simulating a real patient in a clinical consultation.
 
 Behaviour rules:
@@ -214,15 +321,21 @@ Behaviour rules:
 - If unsure, say so plainly (e.g. "I'm not sure", "I don't remember").
 - Stay emotionally consistent with the case.
 - Never mention you are an AI, model, or simulation.
-"""
-    },
-    {
-        "role": "system",
-        "content": system_text  # ← Airtable case details + hard rules
-    }
-]
+
+{disclosure_policy}
+""".strip(),
+        },
+        {
+            "role": "system",
+            "content": system_text,  # ← Airtable case details + hard rules
+        },
+    ]
 
     context = LLMContext(messages)
+
+    # (3) attach limiter
+    limiter = TwoSentenceLimiter(context)
+
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -239,6 +352,7 @@ Behaviour rules:
             stt,
             user_aggregator,
             llm,
+            limiter,  # (3) enforce 1–2 sentences
             tts,
             transport.output(),
             assistant_aggregator,
@@ -256,10 +370,29 @@ Behaviour rules:
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
-        # Small opening, but keep the case rules as the main system message above.
-        messages.append(
-            {"role": "system", "content": "Say hello and stay in character as the patient."}
-        )
+
+        # (2) opening: ONLY the opening sentence, then stop
+        if opening_sentence:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Start the consultation now by saying ONLY the OPENING SENTENCE exactly as written, "
+                        "as ONE short line. Do not add anything else."
+                    ),
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Start the consultation now with a brief greeting as the patient in ONE short line, "
+                        "then stop and wait."
+                    ),
+                }
+            )
+
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
