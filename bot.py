@@ -16,17 +16,14 @@ print("⏳ Loading models and imports (20 seconds, first run only)\n")
 
 logger.info("Loading Local Smart Turn Analyzer V3...")
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-
 logger.info("✅ Local Smart Turn Analyzer V3 loaded")
+
 logger.info("Loading Silero VAD model...")
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-
 logger.info("✅ Silero VAD model loaded")
 
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
-
-logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -51,9 +48,14 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-# Version stamp to confirm the deployed image is actually updated
-BOT_VERSION = "2026-02-05-case-selection-fix-no-baseprocessor"
+BOT_VERSION = "2026-02-05-transcript-submit-v1"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
+
+# Where to submit transcript for grading (ONLY on disconnect)
+GRADING_SUBMIT_URL = os.getenv(
+    "GRADING_SUBMIT_URL",
+    "https://voice-patient-web.vercel.app/api/submit-transcript",
+)
 
 
 # ----------------------- AIRTABLE HELPERS -----------------------
@@ -148,8 +150,8 @@ def fetch_case_system_text(case_id: int) -> str:
         params = {"pageSize": "100"}
         if offset:
             params["offset"] = offset
-        url = f"https://api.airtable.com/v0/{base_id}/{requests.utils.quote(table_name)}"
 
+        url = f"https://api.airtable.com/v0/{base_id}/{requests.utils.quote(table_name)}"
         resp = requests.get(
             url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -158,6 +160,7 @@ def fetch_case_system_text(case_id: int) -> str:
         )
         if not resp.ok:
             raise RuntimeError(f"Airtable error {resp.status_code}: {resp.text[:400]}")
+
         data = resp.json()
         records.extend(data.get("records", []))
         offset = data.get("offset")
@@ -171,9 +174,6 @@ def fetch_case_system_text(case_id: int) -> str:
 
 
 def extract_opening_sentence(system_text: str) -> str:
-    """
-    Extract the OPENING SENTENCE block from the Airtable-built system_text.
-    """
     m = re.search(
         r"OPENING SENTENCE:\s*(.*?)(?:\n\s*\n|DIVULGE FREELY:)",
         system_text,
@@ -186,29 +186,44 @@ def extract_opening_sentence(system_text: str) -> str:
     return opening
 
 
+def build_transcript_from_context(context: LLMContext):
+    """
+    Build transcript (user+assistant only) from the LLM context.
+    This is called ONLY on disconnect to avoid any runtime overhead.
+    """
+    out = []
+    for m in context.messages:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = (m.get("content") or "").strip()
+        if not text:
+            continue
+        out.append({"role": role, "text": text})
+    return out
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting bot")
 
-    # --- Services ---
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",
     )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # --- Case selection (from session body, fallback to env) ---
-    # NOTE: runner_args.body is populated when you start the session with:
-    # { "body": { "caseId": 81 } }
+    # --- Case selection from session body (fast, no network) ---
     body = getattr(runner_args, "body", None) or {}
-    logger.info(f"📥 DEBUG runner_args.body={body}")
+    logger.info(f"📥 runner_args.body={body}")
 
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
-    logger.info(f"📘 Using case_id={case_id} (session body={body})")
+    user_id = body.get("userId")  # optional for later
+    logger.info(f"📘 Using case_id={case_id} (userId={user_id})")
 
-    # Build system prompt from Airtable at startup
+    # Fetch case prompt from Airtable once at startup
     try:
         system_text = fetch_case_system_text(case_id)
         logger.info(f"✅ Loaded Airtable system prompt for Case {case_id}")
@@ -219,10 +234,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "Tell the clinician you haven't been given the case details."
         )
 
-    # Pull out opening sentence so we can force it on connect
     opening_sentence = extract_opening_sentence(system_text)
 
-    # Disclosure policy (stronger and explicit)
     disclosure_policy = """
 DISCLOSURE POLICY (follow exactly):
 
@@ -234,19 +247,11 @@ Rules:
 1) Default reply length is 1–2 sentences. No lists. No multi-part dumping.
 2) For vague/open questions AFTER the opening question:
    - Give a brief general answer (1 short sentence)
-   - Then ask a narrowing question: "What would you like to know about specifically?"
+   - Then ask: "What would you like to know about specifically?"
    - Do NOT volunteer detailed PMHx / social / family / ICE / extra symptoms.
 3) Only reveal information from "DIVULGE ONLY IF ASKED" when a direct question matches it.
 4) "DIVULGE FREELY" must still be relevant to the specific question. Do not dump the whole section.
 5) If the clinician reassures you about something, do not re-introduce that worry unless asked again.
-
-Examples:
-- Clinician: "How is your general health?"
-  Patient: "Mostly okay, just a bit worried because of the main problem. What would you like to know about specifically?"
-- Clinician: "Do you smoke?"
-  Patient: "<answer from Social History in 1 sentence>"
-- Clinician: "Any other symptoms?"
-  Patient: "Not that I can think of. Is there something you’re particularly looking for?"
 """.strip()
 
     messages = [
@@ -270,10 +275,7 @@ Behaviour rules:
 {disclosure_policy}
 """.strip(),
         },
-        {
-            "role": "system",
-            "content": system_text,  # Airtable case details + hard rules
-        },
+        {"role": "system", "content": system_text},
     ]
 
     context = LLMContext(messages)
@@ -302,17 +304,12 @@ Behaviour rules:
 
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(
-            enable_metrics=True,
-            enable_usage_metrics=True,
-        ),
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
-
-        # Opening: ONLY the opening sentence, then stop
         if opening_sentence:
             messages.append(
                 {
@@ -333,12 +330,31 @@ Behaviour rules:
                     ),
                 }
             )
-
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
+
+        # Build transcript ONLY now (zero cost during live session)
+        transcript = build_transcript_from_context(context)
+
+        session_id = getattr(runner_args, "session_id", None)
+        payload = {
+            "sessionId": session_id,
+            "caseId": case_id,
+            "userId": user_id,
+            "transcript": transcript,
+        }
+
+        # Submit transcript for grading (only after session ends)
+        try:
+            logger.info(f"📤 Submitting transcript for grading: sessionId={session_id} caseId={case_id}")
+            r = requests.post(GRADING_SUBMIT_URL, json=payload, timeout=30)
+            logger.info(f"📤 Grading submit response: {r.status_code} {r.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ Failed to submit transcript for grading: {e}")
+
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
@@ -350,12 +366,10 @@ async def bot(runner_args: RunnerArguments):
         "daily": lambda: DailyParams(audio_in_enabled=True, audio_out_enabled=True),
         "webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True),
     }
-
     transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
 
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
-
     main()
