@@ -1,4 +1,3 @@
-#
 # Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
@@ -7,6 +6,7 @@
 import os
 import re
 import json
+import time  # ✅ NEW (only used to measure session duration)
 import threading
 import requests
 
@@ -55,7 +55,10 @@ logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
 # Recommended: set in Pipecat secret set to avoid accidental defaults.
-GRADING_SUBMIT_URL = os.getenv("GRADING_SUBMIT_URL", "").strip() or "https://voice-patient-web.vercel.app/api/submit-transcript"
+GRADING_SUBMIT_URL = (
+    os.getenv("GRADING_SUBMIT_URL", "").strip()
+    or "https://voice-patient-web.vercel.app/api/submit-transcript"
+)
 logger.info(f"✅ GRADING_SUBMIT_URL={GRADING_SUBMIT_URL}")
 
 
@@ -211,7 +214,10 @@ def _submit_grading_in_background(url: str, payload: dict):
     """
     try:
         logger.info(f"📤 [BG] POST {url}")
-        logger.info(f"📤 [BG] payload preview: {json.dumps({k: payload[k] for k in payload if k != 'transcript'}, ensure_ascii=False)[:400]}")
+        logger.info(
+            f"📤 [BG] payload preview: "
+            f"{json.dumps({k: payload[k] for k in payload if k != 'transcript'}, ensure_ascii=False)[:400]}"
+        )
         r = requests.post(url, json=payload, timeout=60)
         logger.info(f"📤 [BG] response: {r.status_code} {r.text[:400]}")
     except Exception as e:
@@ -242,6 +248,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     logger.info(f"📘 Using case_id={case_id} (userId={user_id}, email={email})")
 
+    # ✅ NEW: session timing (for "under 2 minutes don't charge" logic downstream)
+    connected_at = None
 
     # Fetch case prompt from Airtable once at startup
     try:
@@ -329,7 +337,10 @@ Behaviour rules:
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected")
+        nonlocal connected_at
+        connected_at = time.time()  # ✅ NEW
+        logger.info(f"Client connected (connected_at={connected_at})")
+
         if opening_sentence:
             messages.append(
                 {
@@ -356,12 +367,23 @@ Behaviour rules:
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
 
+        # ✅ NEW: duration (seconds)
+        duration_seconds = None
+        try:
+            if connected_at is not None:
+                duration_seconds = int(max(0, time.time() - connected_at))
+        except Exception:
+            duration_seconds = None
+
         # Build transcript ONLY now (zero cost during live session)
         transcript = build_transcript_from_context(context)
 
         # IMPORTANT: log session id so you can compare with browser polling id
         session_id = getattr(runner_args, "session_id", None)
-        logger.info(f"🧾 Transcript built: session_id={session_id} case_id={case_id} turns={len(transcript)}")
+        logger.info(
+            f"🧾 Transcript built: session_id={session_id} case_id={case_id} turns={len(transcript)} "
+            f"duration_seconds={duration_seconds}"
+        )
 
         if not transcript:
             logger.warning("⚠️ Transcript is empty; skipping grading submit.")
@@ -371,6 +393,7 @@ Behaviour rules:
                 "caseId": case_id,
                 "userId": user_id,
                 "email": email,
+                "durationSeconds": duration_seconds,  # ✅ NEW (no other behaviour change)
                 "transcript": transcript,
             }
 
