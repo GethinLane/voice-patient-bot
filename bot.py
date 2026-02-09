@@ -235,8 +235,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"📥 runner_args.body={body}")
 
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
-    user_id = body.get("userId")  # optional for later
-    logger.info(f"📘 Using case_id={case_id} (userId={user_id})")
+
+    # ✅ capture identity from MemberSpace (passed through start-session.js)
+    user_id = (body.get("userId") or "").strip() or None
+    email = (body.get("email") or "").strip().lower() or None
+
+    logger.info(f"📘 Using case_id={case_id} (userId={user_id}, email={email})")
+
 
     # Fetch case prompt from Airtable once at startup
     try:
@@ -265,7 +270,7 @@ Rules:
    - Then ask: "What would you like to know about specifically?"
    - Do NOT volunteer detailed PMHx / social / family / ICE / extra symptoms.
 3) Only reveal information from "DIVULGE ONLY IF ASKED" when a direct question matches it.
-4) "DIVULGE FREELY" must still be relevant to the specific question. Do not dump the whole section.
+4) "DIVULGE FREELY" must still be relevant to the specific question.
 5) If the clinician reassures you about something, do not re-introduce that worry unless asked again.
 """.strip()
 
@@ -365,6 +370,7 @@ Behaviour rules:
                 "sessionId": session_id,
                 "caseId": case_id,
                 "userId": user_id,
+                "email": email,
                 "transcript": transcript,
             }
 
