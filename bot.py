@@ -299,8 +299,24 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # STT / LLM / TTS
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = _build_tts_from_body(body)
+
+    # ✅ Make TTS selection loud + safe
+    try:
+        logger.info(f"🔊 Requested TTS config: {body.get('tts')}")
+        if isinstance(body.get("tts"), dict) and str(body["tts"].get("provider", "")).lower() == "elevenlabs":
+            logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
+        tts = _build_tts_from_body(body)
+        logger.info(f"✅ TTS created: {type(tts)}")
+    except Exception as e:
+        logger.error(f"❌ TTS init failed ({body.get('tts')}): {e}")
+        logger.error("↩️ Falling back to Cartesia so session can continue")
+        tts = CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            voice_id=os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
+        )
+    
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+
 
     # Case selection from session body
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
