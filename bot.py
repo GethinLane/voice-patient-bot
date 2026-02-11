@@ -285,7 +285,7 @@ def _build_tts_from_body(body: dict):
             api_key=api_key,
             voice_id=voice_id,
             model=model_id,
-            sample_rate=48000,
+            sample_rate=24000,
             # Turn on internal service logging (supported by Pipecat)
             params=ElevenLabsTTSService.InputParams(enable_logging=True),
         )
