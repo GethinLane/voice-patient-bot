@@ -6,7 +6,7 @@
 import os
 import re
 import json
-import time  # ✅ NEW (only used to measure session duration)
+import time  # used to measure session duration
 import threading
 import requests
 
@@ -36,9 +36,14 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
+
 from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsHttpTTSService
+from pipecat.services.google.tts import GoogleTTSService
+
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
@@ -50,11 +55,10 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-BOT_VERSION = "2026-02-05-transcript-submit-v2"
+BOT_VERSION = "2026-02-11-multi-tts-v1"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
-# Recommended: set in Pipecat secret set to avoid accidental defaults.
 GRADING_SUBMIT_URL = (
     os.getenv("GRADING_SUBMIT_URL", "").strip()
     or "https://voice-patient-web.vercel.app/api/submit-transcript"
@@ -190,6 +194,8 @@ def extract_opening_sentence(system_text: str) -> str:
     return opening
 
 
+# ----------------------- TRANSCRIPT HELPERS -----------------------
+
 def build_transcript_from_context(context: LLMContext):
     """
     Build transcript (user+assistant only) from the LLM context.
@@ -224,31 +230,92 @@ def _submit_grading_in_background(url: str, payload: dict):
         logger.error(f"❌ [BG] submit failed: {e}")
 
 
+# ----------------------- TTS SELECTION -----------------------
+
+def _safe_lower(x):
+    return str(x).strip().lower() if x is not None else ""
+
+
+def _build_tts_from_body(body: dict):
+    """
+    Create the TTS service based on runner_args.body.tts
+
+    Expected shape:
+      body.tts = {
+        "provider": "cartesia" | "elevenlabs" | "google",
+        "voice": "<voice_id_or_voice_name>",
+        "model": "<optional>",
+        "config": { ...optional... }   # NOTE: not applied yet (avoid runtime crashes)
+      }
+
+    Defaults to Cartesia if anything is missing.
+    """
+    tts_cfg = body.get("tts") if isinstance(body, dict) else None
+    tts_cfg = tts_cfg if isinstance(tts_cfg, dict) else {}
+
+    provider = _safe_lower(tts_cfg.get("provider") or "cartesia")
+    voice = (tts_cfg.get("voice") or "").strip() or None
+    model = (tts_cfg.get("model") or "").strip() or None
+
+    # CARTESIA (default)
+    if provider in ("cartesia", ""):
+        return CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            voice_id=voice or os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
+        )
+
+    # ELEVENLABS
+    if provider == "elevenlabs":
+        if not os.getenv("ELEVENLABS_API_KEY"):
+            raise RuntimeError("ELEVENLABS_API_KEY missing (provider=elevenlabs)")
+        # WebSocket streaming service (good for real-time)
+        return ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            voice_id=voice or os.getenv("ELEVENLABS_VOICE_ID"),
+            model=model or os.getenv("ELEVENLABS_MODEL") or "turbo",
+        )
+        # If you ever prefer HTTP instead, swap to:
+        # return ElevenLabsHttpTTSService(...)
+
+    # GOOGLE
+    if provider == "google":
+        # Google auth is usually via GOOGLE_APPLICATION_CREDENTIALS in the container environment.
+        # We'll wire credentials properly once you decide how to store the service account JSON in Pipecat Cloud.
+        return GoogleTTSService(
+            voice_name=voice or os.getenv("GOOGLE_TTS_VOICE_NAME"),
+        )
+
+    raise RuntimeError(f"Unknown TTS provider: {provider}")
+
+
+# ----------------------- MAIN BOT -----------------------
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",
-    )
-
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
-
-    # --- Case selection from session body (fast, no network) ---
+    # Session body from Vercel (fast, no network)
     body = getattr(runner_args, "body", None) or {}
     logger.info(f"📥 runner_args.body={body}")
 
+    # STT / LLM / TTS
+    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    tts = _build_tts_from_body(body)
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+
+    # Case selection from session body
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
 
-    # ✅ capture identity from MemberSpace (passed through start-session.js)
+    # Identity passthrough
     user_id = (body.get("userId") or "").strip() or None
     email = (body.get("email") or "").strip().lower() or None
 
-    logger.info(f"📘 Using case_id={case_id} (userId={user_id}, email={email})")
+    # Tone passthrough (optional)
+    start_tone = (body.get("startTone") or "neutral").strip().lower()
+    tone_intensity = (body.get("toneIntensity") or "").strip().lower()
 
-    # ✅ NEW: session timing (for "under 2 minutes don't charge" logic downstream)
+    logger.info(f"📘 Using case_id={case_id} (userId={user_id}, email={email}, startTone={start_tone})")
+
+    # Session timing
     connected_at = None
 
     # Fetch case prompt from Airtable once at startup
@@ -299,6 +366,8 @@ Behaviour rules:
 - If unsure, say so plainly (e.g. "I'm not sure", "I don't remember").
 - Stay emotionally consistent with the case.
 - Never mention you are an AI, model, or simulation.
+- Start the consultation with this emotional tone: {start_tone}{(" (" + tone_intensity + ")") if tone_intensity else ""}.
+- Keep answers consistent with this tone at the beginning, and adjust naturally if the clinician is empathic/reassuring.
 
 {disclosure_policy}
 """.strip(),
@@ -338,7 +407,7 @@ Behaviour rules:
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         nonlocal connected_at
-        connected_at = time.time()  # ✅ NEW
+        connected_at = time.time()
         logger.info(f"Client connected (connected_at={connected_at})")
 
         if opening_sentence:
@@ -361,13 +430,14 @@ Behaviour rules:
                     ),
                 }
             )
+
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
 
-        # ✅ NEW: duration (seconds)
+        # duration seconds
         duration_seconds = None
         try:
             if connected_at is not None:
@@ -375,10 +445,8 @@ Behaviour rules:
         except Exception:
             duration_seconds = None
 
-        # Build transcript ONLY now (zero cost during live session)
         transcript = build_transcript_from_context(context)
 
-        # IMPORTANT: log session id so you can compare with browser polling id
         session_id = getattr(runner_args, "session_id", None)
         logger.info(
             f"🧾 Transcript built: session_id={session_id} case_id={case_id} turns={len(transcript)} "
@@ -393,11 +461,11 @@ Behaviour rules:
                 "caseId": case_id,
                 "userId": user_id,
                 "email": email,
-                "durationSeconds": duration_seconds,  # ✅ NEW (no other behaviour change)
+                "durationSeconds": duration_seconds,
                 "transcript": transcript,
             }
 
-            # Fire-and-forget background submit (so we don't hang teardown)
+            # Fire-and-forget background submit
             try:
                 logger.info(f"📤 Queueing transcript submit to {GRADING_SUBMIT_URL}")
                 th = threading.Thread(
