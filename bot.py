@@ -266,16 +266,29 @@ def _build_tts_from_body(body: dict):
 
     # ELEVENLABS
     if provider == "elevenlabs":
-        if not os.getenv("ELEVENLABS_API_KEY"):
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
             raise RuntimeError("ELEVENLABS_API_KEY missing (provider=elevenlabs)")
-        # WebSocket streaming service (good for real-time)
+    
+        voice_id = voice or os.getenv("ELEVENLABS_VOICE_ID")
+        if not voice_id:
+            raise RuntimeError(
+                "ElevenLabs selected but no voice_id provided. "
+                "Set it in Airtable (tts.voice) or ELEVENLABS_VOICE_ID env var."
+            )
+
+        model_id = model or os.getenv("ELEVENLABS_MODEL") or "eleven_turbo_v2_5"
+
+        # IMPORTANT: force a playable format for Daily/WebRTC
+        # 48000 is the safest default for WebRTC pipelines.
         return ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id=voice or os.getenv("ELEVENLABS_VOICE_ID"),
-            model=model or os.getenv("ELEVENLABS_MODEL") or "turbo",
+            api_key=api_key,
+            voice_id=voice_id,
+            model=model_id,
+            sample_rate=48000,
+            # Turn on internal service logging (supported by Pipecat)
+            params=ElevenLabsTTSService.InputParams(enable_logging=True),
         )
-        # If you ever prefer HTTP instead, swap to:
-        # return ElevenLabsHttpTTSService(...)
 
     # GOOGLE
     if provider == "google":
