@@ -316,11 +316,12 @@ def _build_tts_from_body(body: dict):
 
     # GOOGLE
     if provider == "google":
-        # Google auth is usually via GOOGLE_APPLICATION_CREDENTIALS in the container environment.
-        # We'll wire credentials properly once you decide how to store the service account JSON in Pipecat Cloud.
-        return GoogleTTSService(
-            voice_name=voice or os.getenv("GOOGLE_TTS_VOICE_NAME"),
-        )
+        if not voice:
+        raise RuntimeError("Google TTS selected but no voice_id provided in Airtable (tts.voice).")
+
+    return GoogleTTSService(
+        voice_id=voice,   # ✅ this is the key fix
+    )
 
     raise RuntimeError(f"Unknown TTS provider: {provider}")
 
