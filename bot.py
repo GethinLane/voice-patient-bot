@@ -65,6 +65,30 @@ GRADING_SUBMIT_URL = (
 )
 logger.info(f"✅ GRADING_SUBMIT_URL={GRADING_SUBMIT_URL}")
 
+# ----------------------- GOOGLE ADC (SERVICE ACCOUNT JSON) -----------------------
+
+def _ensure_google_adc():
+    """
+    If GOOGLE_APPLICATION_CREDENTIALS isn't set but GOOGLE_SA_JSON is,
+    write the service account JSON to /tmp and set GOOGLE_APPLICATION_CREDENTIALS.
+    """
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return
+
+    sa_json = os.getenv("GOOGLE_SA_JSON")
+    if not sa_json:
+        return
+
+    path = "/tmp/google-sa.json"
+    try:
+        data = json.loads(sa_json)  # validate JSON
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+        logger.info(f"✅ Google ADC configured: GOOGLE_APPLICATION_CREDENTIALS={path}")
+    except Exception as e:
+        logger.error(f"❌ Failed to configure Google ADC from GOOGLE_SA_JSON: {e}")
+
 
 # ----------------------- AIRTABLE HELPERS -----------------------
 
@@ -312,6 +336,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # STT / LLM / TTS
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+
+    # Ensure Google credentials exist before any Google client init
+    _ensure_google_adc()
 
     # ✅ Make TTS selection loud + safe
     try:
