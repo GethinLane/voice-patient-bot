@@ -316,12 +316,15 @@ def _build_tts_from_body(body: dict):
 
     # GOOGLE
     if provider == "google":
-        if not voice:
-        raise RuntimeError("Google TTS selected but no voice_id provided in Airtable (tts.voice).")
+        voice_id = (voice or "").strip()
+        if not voice_id:
+            raise RuntimeError(
+                "Google TTS selected but no voice_id provided in Airtable (tts.voice)."
+            )
 
-    return GoogleTTSService(
-        voice_id=voice,   # ✅ this is the key fix
-    )
+        logger.info(f"🔊 Google TTS voice_id={voice_id!r} (from Airtable)")
+        return GoogleTTSService(voice_id=voice_id)
+
 
     raise RuntimeError(f"Unknown TTS provider: {provider}")
 
