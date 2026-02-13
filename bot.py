@@ -116,7 +116,7 @@ def _combine_field_across_rows(records, field_name: str) -> str:
 
 def _build_system_text_from_case(records) -> str:
     opening = _combine_field_across_rows(records, "Opening Sentence")
-    divulge_freely = _combine_field_across_rows(records, "Divulge freely")
+    divulge_freely = _combine_field_across_rows(records, "Divulge Freely")
     divulge_asked = _combine_field_across_rows(records, "Divulge Asked")
     pmhx = _combine_field_across_rows(records, "PMHx RP")
     social = _combine_field_across_rows(records, "Social History")
