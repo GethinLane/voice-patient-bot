@@ -436,7 +436,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     opening_sentence = extract_opening_sentence(system_text)
 
-disclosure_policy = """
+    disclosure_policy = """
 DISCLOSURE POLICY (follow exactly):
 
 Definitions:
