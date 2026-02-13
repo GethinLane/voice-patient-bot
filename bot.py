@@ -391,19 +391,38 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             voice_id=os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
         )
 
-    # --- LLM MODEL SELECTION (required; no fallback) ---
-    openai_conversation_model = (os.getenv("OPENAI_CONVERSATION_MODEL") or "").strip()
-    if not openai_conversation_model:
-        raise RuntimeError(
-            "Missing required env var: OPENAI_CONVERSATION_MODEL "
-            "(e.g. set it to 'gpt-4.1-mini' or 'gpt-5-mini')."
-        )
-    
-    logger.info(f"🧠 OpenAI conversation model selected: {openai_conversation_model}")
-    
+    # --- LLM MODEL SELECTION (strict, conversation-specific; no fallback) ---
+    ENV_STD = "OPENAI_CONVERSATION_MODEL_STANDARD"
+    ENV_PREM = "OPENAI_CONVERSATION_MODEL_PREMIUM"
+
+    standard_model = (os.getenv(ENV_STD) or "").strip()
+    premium_model  = (os.getenv(ENV_PREM) or "").strip()
+
+    if mode == "premium":
+        if not premium_model:
+            raise RuntimeError(
+                f"Missing required env var: {ENV_PREM} "
+                "(e.g. set it to 'gpt-5.1')."
+            )
+        selected_model = premium_model
+        selected_env = ENV_PREM
+    else:
+        if not standard_model:
+            raise RuntimeError(
+                f"Missing required env var: {ENV_STD} "
+                "(e.g. set it to 'gpt-4.1-mini')."
+            )
+        selected_model = standard_model
+        selected_env = ENV_STD
+
+    logger.info(
+        f"🧠 OpenAI conversation model selected: {selected_model} "
+        f"(mode={mode}, env={selected_env})"
+    )
+
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        model=openai_conversation_model,
+        model=selected_model,
     )
 
 
