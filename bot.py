@@ -338,6 +338,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     body = getattr(runner_args, "body", None) or {}
     logger.info(f"📥 runner_args.body={body}")
 
+    def _normalize_mode(value):
+        v = str(value or "").strip().lower()
+        return "premium" if v == "premium" else "standard"
+    
+    mode = _normalize_mode(
+        body.get("mode")
+        or body.get("botMode")
+        or (body.get("metadata") or {}).get("mode")
+        or (body.get("meta") or {}).get("mode")
+        or (body.get("context") or {}).get("mode")
+    )
+    
+    logger.info(f"🧩 Session mode resolved: {mode}")
+
+
     # STT / LLM / TTS
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
@@ -526,6 +541,7 @@ Behaviour rules:
                 "caseId": case_id,
                 "userId": user_id,
                 "email": email,
+                "mode": mode,
                 "durationSeconds": duration_seconds,
                 "transcript": transcript,
             }
