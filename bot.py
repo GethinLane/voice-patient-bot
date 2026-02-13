@@ -41,6 +41,8 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsHttpTTSService
 from pipecat.services.google.tts import GoogleTTSService, Language
 
+from pipecat.transcriptions.language import Language
+
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 
@@ -320,14 +322,27 @@ def _build_tts_from_body(body: dict):
         if not voice_id:
             raise RuntimeError("Google TTS selected but no voice_id provided in Airtable (tts.voice).")
 
-        # ✅ Default everything to British English
+        # Determine language from the voice_id prefix (e.g. "en-GB-...", "en-IN-...")
+        lang_code = "en-GB"  # default to GB
+        m = re.match(r"^([a-z]{2}-[A-Z]{2})-", voice_id)
+        if m:
+            lang_code = m.group(1)
+
+        lang_map = {
+            "en-GB": Language.EN_GB,
+            "en-IN": Language.EN_IN,
+            "en-US": Language.EN_US,
+            "en-AU": Language.EN_AU,
+        }
+        lang_enum = lang_map.get(lang_code, Language.EN_GB)
+
+        logger.info(f"🔊 Google TTS voice_id={voice_id!r}, language={lang_enum}")
+
         return GoogleTTSService(
             voice_id=voice_id,
-            params=GoogleTTSService.InputParams(
-                language=Language.EN_GB
-            ),
+            params=GoogleTTSService.InputParams(language=lang_enum),
         )
-
+        
     raise RuntimeError(f"Unknown TTS provider: {provider}")
 
 
