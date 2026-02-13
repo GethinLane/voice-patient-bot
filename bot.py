@@ -390,8 +390,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             api_key=os.getenv("CARTESIA_API_KEY"),
             voice_id=os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
         )
+
+    # --- LLM MODEL SELECTION (required; no fallback) ---
+    openai_conversation_model = (os.getenv("OPENAI_CONVERSATION_MODEL") or "").strip()
+    if not openai_conversation_model:
+        raise RuntimeError(
+            "Missing required env var: OPENAI_CONVERSATION_MODEL "
+            "(e.g. set it to 'gpt-4.1-mini' or 'gpt-5-mini')."
+        )
     
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+    logger.info(f"🧠 OpenAI conversation model selected: {openai_conversation_model}")
+    
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model=openai_conversation_model,
+    )
 
 
     # Case selection from session body
