@@ -423,7 +423,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             aiohttp_session = aiohttp.ClientSession()
 
         if tts_provider == "elevenlabs":
-           logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
+            logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
 
         tts = _build_tts_from_body(body, aiohttp_session=aiohttp_session)
         logger.info(f"✅ TTS created: {type(tts)}")
