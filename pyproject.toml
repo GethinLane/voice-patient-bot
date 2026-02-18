@@ -7,6 +7,7 @@ dependencies = [
     "pipecat-ai[webrtc,daily,silero,deepgram,openai,cartesia,elevenlabs,google,local-smart-turn-v3,runner]",
     "pipecat-ai-cli",
     "requests>=2.31.0",
+    "aiohttp>=3.9.0",
 ]
 
 
