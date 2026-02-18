@@ -409,6 +409,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     _ensure_google_adc()
 
     aiohttp_session = None
+    async def _close_aiohttp_session():
+        nonlocal aiohttp_session
+        try:
+            if aiohttp_session is not None and not aiohttp_session.closed:
+                await aiohttp_session.close()
+        except Exception as e:
+            logger.warning(f"Failed to close aiohttp session: {e}")
+        aiohttp_session = None
 
     # ✅ Make TTS selection loud + safe
     try:
@@ -684,14 +692,12 @@ Hard style rules (must follow):
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     try:
         await runner.run(task)
     finally:
-        try:
-            if aiohttp_session is not None and not aiohttp_session.closed:
-                await aiohttp_session.close()
-        except Exception as e:
-            logger.warning(f"Failed to close aiohttp session: {e}")
+        await _close_aiohttp_session()
+
 
 
 
