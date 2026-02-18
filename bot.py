@@ -538,13 +538,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
         model=selected_model,
-        params=OpenAILLMService.InputParams(
-            stream=True,
-            max_tokens=160,
-            temperature=0.2,
-        ),
     )
-
 
 
     # Case selection from session body
