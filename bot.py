@@ -10,6 +10,8 @@ import time  # used to measure session duration
 import threading
 import requests
 import aiohttp
+import base64
+import codecs
 
 
 from dotenv import load_dotenv
@@ -57,6 +59,56 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
+class SafeInworldHttpTTSService(InworldHttpTTSService):
+    async def _process_streaming_response(self, response: aiohttp.ClientResponse, context_id: str):
+        buffer = ""
+        utterance_duration = 0.0
+
+        decoder = codecs.getincrementaldecoder("utf-8")()
+
+        async for chunk in response.content.iter_chunked(1024):
+            if not chunk:
+                continue
+
+            buffer += decoder.decode(chunk)
+
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line_str = line.strip()
+
+                if not line_str:
+                    continue
+
+                try:
+                    chunk_data = json.loads(line_str)
+                except json.JSONDecodeError:
+                    continue
+
+                result = chunk_data.get("result") or {}
+
+                audio_b64 = result.get("audioContent")
+                if audio_b64:
+                    await self.stop_ttfb_metrics()
+                    async for frame in self._process_audio_chunk(
+                        base64.b64decode(audio_b64),
+                        context_id,
+                    ):
+                        yield frame
+
+                timestamp_info = result.get("timestampInfo")
+                if timestamp_info:
+                    word_times, chunk_end_time = self._calculate_word_times(timestamp_info)
+                    if word_times:
+                        await self.add_word_timestamps(word_times, context_id)
+                    utterance_duration = max(utterance_duration, chunk_end_time)
+
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            buffer += tail
+
+        if utterance_duration > 0:
+            self._cumulative_time += utterance_duration
+            
 logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
@@ -337,7 +389,7 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
 
         logger.info(f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}")
 
-        return InworldHttpTTSService(
+        return SafeInworldHttpTTSService(
             api_key=api_key,                 # Pipecat sends: Authorization: Basic <api_key>
             aiohttp_session=aiohttp_session, # required
             voice_id=voice_id,
