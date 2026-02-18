@@ -9,6 +9,8 @@ import json
 import time  # used to measure session duration
 import threading
 import requests
+import aiohttp
+
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -40,8 +42,10 @@ from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsHttpTTSService
 from pipecat.services.google.tts import GoogleTTSService, Language
+from pipecat.services.inworld.tts import InworldHttpTTSService
 
-from pipecat.transcriptions.language import Language
+
+from pipecat.transcriptions.language import Language as TranscriptLanguage
 
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -262,13 +266,13 @@ def _safe_lower(x):
     return str(x).strip().lower() if x is not None else ""
 
 
-def _build_tts_from_body(body: dict):
+def _build_tts_from_body(body: dict, aiohttp_session=None):
     """
     Create the TTS service based on runner_args.body.tts
 
     Expected shape:
       body.tts = {
-        "provider": "cartesia" | "elevenlabs" | "google",
+        "provider": "cartesia" | "elevenlabs" | "google" | "inworld",
         "voice": "<voice_id_or_voice_name>",
         "model": "<optional>",
         "config": { ...optional... }   # NOTE: not applied yet (avoid runtime crashes)
@@ -315,6 +319,34 @@ def _build_tts_from_body(body: dict):
             # Turn on internal service logging (supported by Pipecat)
             params=ElevenLabsTTSService.InputParams(enable_logging=True),
         )
+        
+    # INWORLD (HTTP streaming)
+    if provider == "inworld":
+        api_key = (os.getenv("INWORLD_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "INWORLD_API_KEY missing. Set it to the Inworld Base64 runtime credential "
+                "(do NOT include 'Basic ')."
+            )
+
+        if aiohttp_session is None:
+            raise RuntimeError("Inworld selected but aiohttp_session was not provided.")
+
+        voice_id = (voice or "").strip() or os.getenv("INWORLD_VOICE_ID") or "Ashley"
+        model_id = (model or "").strip() or os.getenv("INWORLD_MODEL_ID") or "inworld-tts-1.5-max"
+
+        logger.info(f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}")
+
+        return InworldHttpTTSService(
+            api_key=api_key,                 # Pipecat sends: Authorization: Basic <api_key>
+            aiohttp_session=aiohttp_session, # required
+            voice_id=voice_id,
+            model=model_id,
+            streaming=True,                  # uses /tts/v1/voice:stream
+            encoding="LINEAR16",
+            sample_rate=None,
+        )
+
 
     # GOOGLE
     if provider == "google":
@@ -376,20 +408,43 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # Ensure Google credentials exist before any Google client init
     _ensure_google_adc()
 
+    aiohttp_session = None
+
     # ✅ Make TTS selection loud + safe
     try:
         logger.info(f"🔊 Requested TTS config: {body.get('tts')}")
-        if isinstance(body.get("tts"), dict) and str(body["tts"].get("provider", "")).lower() == "elevenlabs":
-            logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
-        tts = _build_tts_from_body(body)
+
+        tts_provider = ""
+        if isinstance(body.get("tts"), dict):
+            tts_provider = str(body["tts"].get("provider", "")).strip().lower()
+
+        # Only create aiohttp session if we actually need it
+        if tts_provider == "inworld":
+            aiohttp_session = aiohttp.ClientSession()
+
+        if tts_provider == "elevenlabs":
+           logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
+
+        tts = _build_tts_from_body(body, aiohttp_session=aiohttp_session)
         logger.info(f"✅ TTS created: {type(tts)}")
+
     except Exception as e:
         logger.error(f"❌ TTS init failed ({body.get('tts')}): {e}")
         logger.error("↩️ Falling back to Cartesia so session can continue")
+
+        # If we created an aiohttp session, close it on failure
+        try:
+            if aiohttp_session is not None and not aiohttp_session.closed:
+                await aiohttp_session.close()
+        except Exception as close_err:
+            logger.warning(f"Failed to close aiohttp session after TTS init failure: {close_err}")
+        aiohttp_session = None
+
         tts = CartesiaTTSService(
             api_key=os.getenv("CARTESIA_API_KEY"),
             voice_id=os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
         )
+
 
     # --- LLM MODEL SELECTION (strict, conversation-specific; no fallback) ---
     ENV_STD = "OPENAI_CONVERSATION_MODEL_STANDARD"
@@ -629,7 +684,15 @@ Hard style rules (must follow):
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    finally:
+        try:
+            if aiohttp_session is not None and not aiohttp_session.closed:
+                await aiohttp_session.close()
+        except Exception as e:
+            logger.warning(f"Failed to close aiohttp session: {e}")
+
 
 
 async def bot(runner_args: RunnerArguments):
