@@ -28,6 +28,7 @@ logger.info("Loading Silero VAD model...")
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 logger.info("✅ Silero VAD model loaded")
 
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -650,7 +651,13 @@ Hard style rules (must follow):
         context,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=UserTurnStrategies(
-                stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]
+                stop=[
+                    TurnAnalyzerUserTurnStopStrategy(
+                        turn_analyzer=LocalSmartTurnAnalyzerV3(
+                            params=SmartTurnParams(stop_secs=1.0)
+                        )
+                    )
+                ]
             ),
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
