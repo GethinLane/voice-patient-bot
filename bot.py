@@ -384,7 +384,16 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
         voice_id = (voice or "").strip() or os.getenv("INWORLD_VOICE_ID") or "Ashley"
         model_id = (model or "").strip() or os.getenv("INWORLD_MODEL_ID") or "inworld-tts-1.5-max"
 
-        logger.info(f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}")
+        # ✅ speaking rate (default 1.0)
+        cfg = tts_cfg.get("config") if isinstance(tts_cfg.get("config"), dict) else {}
+        sr = _safe_float(cfg.get("speakingRate"), 1.0)
+
+        # clamp to avoid extreme / invalid values
+        sr = max(0.5, min(1.5, sr))
+
+        logger.info(f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}, speakingRate={sr}")
+
+        params = InworldHttpTTSService.InputParams(speaking_rate=sr)
 
         return SafeInworldHttpTTSService(
             api_key=api_key,                 # Pipecat sends: Authorization: Basic <api_key>
@@ -394,6 +403,7 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
             streaming=True,                  # uses /tts/v1/voice:stream
             encoding="LINEAR16",
             sample_rate=None,
+            params=params, 
         )
 
 
