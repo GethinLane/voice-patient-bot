@@ -386,19 +386,31 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
         model_id = (model or "").strip() or os.getenv("INWORLD_MODEL_ID") or "inworld-tts-1.5-max"
 
         cfg = tts_cfg.get("config") if isinstance(tts_cfg.get("config"), dict) else {}
-        sr_raw = cfg.get("speakingRate")
+        sr_raw = cfg.get("speakingRate", None)
 
-        try:
-            sr = float(sr_raw) if sr_raw is not None else 1.0
-        except Exception:
-            sr = 1.0
+        # Default to 1.0 if missing / null / blank / invalid
+        sr = 1.0
+        if sr_raw is not None:
+            if isinstance(sr_raw, str) and not sr_raw.strip():
+                sr = 1.0
+            else:
+                try:
+                    sr_candidate = float(sr_raw)
+                    # Reject non-positive values (0 or negative)
+                    sr = sr_candidate if sr_candidate > 0 else 1.0
+                except Exception:
+                    sr = 1.0
 
+        # Clamp only after resolving a valid value
         sr = max(0.5, min(2.0, sr))
 
-
-        logger.info(f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}, speakingRate={sr}")
+        logger.info(
+            f"🔊 Inworld TTS voice_id={voice_id!r}, model_id={model_id!r}, "
+            f"speakingRate(raw)={sr_raw!r} -> {sr}"
+        )
 
         params = InworldHttpTTSService.InputParams(speaking_rate=sr)
+
 
         return SafeInworldHttpTTSService(
             api_key=api_key,                 # Pipecat sends: Authorization: Basic <api_key>
