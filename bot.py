@@ -61,23 +61,24 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 class SafeInworldHttpTTSService(InworldHttpTTSService):
     async def _process_streaming_response(self, response: aiohttp.ClientResponse, context_id: str):
-        buffer = ""
+        buffer = b""
         utterance_duration = 0.0
 
-        decoder = codecs.getincrementaldecoder("utf-8")()
-
-        async for chunk in response.content.iter_chunked(1024):
+        async for chunk in response.content.iter_chunked(4096):
             if not chunk:
                 continue
 
-            buffer += decoder.decode(chunk)
+            buffer += chunk
 
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line_str = line.strip()
-
-                if not line_str:
+            # Process complete newline-delimited JSON records
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.strip()
+                if not line:
                     continue
+
+                # Decode ONLY a full line (prevents split-multibyte UTF-8 crashes)
+                line_str = line.decode("utf-8", errors="strict")
 
                 try:
                     chunk_data = json.loads(line_str)
@@ -101,10 +102,6 @@ class SafeInworldHttpTTSService(InworldHttpTTSService):
                     if word_times:
                         await self.add_word_timestamps(word_times, context_id)
                     utterance_duration = max(utterance_duration, chunk_end_time)
-
-        tail = decoder.decode(b"", final=True)
-        if tail:
-            buffer += tail
 
         if utterance_duration > 0:
             self._cumulative_time += utterance_duration
@@ -486,7 +483,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
 
         tts = _build_tts_from_body(body, aiohttp_session=aiohttp_session)
-        logger.info(f"✅ TTS created: {type(tts)}")
+        logger.info(f"TTS class = {tts.__class__.__module__}.{tts.__class__.__name__}")
 
     except Exception as e:
         logger.error(f"❌ TTS init failed ({body.get('tts')}): {e}")
