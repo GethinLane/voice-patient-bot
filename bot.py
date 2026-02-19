@@ -510,6 +510,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             logger.info(f"🔑 ELEVENLABS_API_KEY present? {bool(os.getenv('ELEVENLABS_API_KEY'))}")
 
         tts = _build_tts_from_body(body, aiohttp_session=aiohttp_session)
+                # 🔍 DIAGNOSTIC: prove which code + pipecat/inworld version this agent is actually running
+        import inspect
+        import pipecat
+        from pipecat.services.inworld.tts import InworldHttpTTSService
+
+        logger.info(f"🔍 BOT_VERSION={BOT_VERSION}")
+        logger.info(f"🔍 bot file={__file__}")
+        logger.info(f"🔍 pipecat version={getattr(pipecat, '__version__', 'unknown')}")
+        logger.info(f"🔍 InworldHttpTTSService file={inspect.getfile(InworldHttpTTSService)}")
+        logger.info(f"🔍 TTS impl={tts.__class__.__module__}.{tts.__class__.__name__}")
+        logger.info(f"🔍 runner_args.body.tts={body.get('tts')}")
+
         logger.info(f"TTS class = {tts.__class__.__module__}.{tts.__class__.__name__}")
 
     except Exception as e:
