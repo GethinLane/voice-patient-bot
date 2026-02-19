@@ -55,6 +55,7 @@ from pipecat.services.openai.llm import OpenAILLMService
 
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
+from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
 from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
     TurnAnalyzerUserTurnStopStrategy,
 )
@@ -797,11 +798,19 @@ Hard style rules (must follow):
 
 async def bot(runner_args: RunnerArguments):
     transport_params = {
-        "daily": lambda: DailyParams(audio_in_enabled=True, audio_out_enabled=True),
-        "webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+        "daily": lambda: DailyParams(
+            audio_in_enabled=True,
+            audio_in_filter=KrispVivaFilter(),  # ✅ Krisp VIVA mic filter
+            audio_out_enabled=True,
+        ),
+        "webrtc": lambda: TransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+        ),
     }
     transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
+
 
 
 if __name__ == "__main__":
