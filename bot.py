@@ -111,7 +111,7 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-BOT_VERSION = "2026-02-11-multi-tts-v1"
+BOT_VERSION = "2026-02-19-speakingrate-default-1.0"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
@@ -496,7 +496,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # ✅ Make TTS selection loud + safe
     try:
-        logger.info(f"🔊 Requested TTS config: {body.get('tts')}")
+        logger.info(f"🔊 Requested TTS config: {json.dumps(body.get('tts'), ensure_ascii=False)}")
 
         tts_provider = ""
         if isinstance(body.get("tts"), dict):
