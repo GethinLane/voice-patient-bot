@@ -114,7 +114,7 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-BOT_VERSION = "2026-02-19-speakingrate-default-1.0"
+BOT_VERSION = "2026-02-20-change-SST-to-2-providers-v1"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
@@ -619,6 +619,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
     # STT / LLM / TTS
+
+    logger.info(
+        "🔎 STT env check: "
+        f"STT_FORCE_PROVIDER={os.getenv('STT_FORCE_PROVIDER')!r} "
+        f"STT_PRIMARY={os.getenv('STT_PRIMARY')!r} "
+        f"STT_SECONDARY={os.getenv('STT_SECONDARY')!r} "
+        f"ASSEMBLYAI_API_KEY_set={bool((os.getenv('ASSEMBLYAI_API_KEY') or '').strip())} "
+        f"DEEPGRAM_API_KEY_set={bool((os.getenv('DEEPGRAM_API_KEY') or '').strip())}"
+    )
+
     stt, stt_provider_in_use, stt_other = choose_stt_primary_first()
     logger.info(f"🎙️ STT selected: {stt_provider_in_use} (secondary={stt_other or 'none'})")
 
