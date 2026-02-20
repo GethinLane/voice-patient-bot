@@ -51,7 +51,7 @@ from pipecat.services.inworld.tts import InworldHttpTTSService
 from pipecat.transcriptions.language import Language as TranscriptLanguage
 
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.assemblyai import AssemblyAISTTService
+from pipecat.services.assemblyai.stt import AssemblyAISTTService
 from pipecat.services.assemblyai.models import AssemblyAIConnectionParams
 from pipecat.services.openai.llm import OpenAILLMService
 
