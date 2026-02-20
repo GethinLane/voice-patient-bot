@@ -190,7 +190,9 @@ def _build_system_text_from_case(records) -> str:
 CRITICAL:
 - You MUST NOT invent details.
 - Only use information explicitly present in the CASE DETAILS below.
-- If something is not stated, say: "I'm not sure" / "I don't remember" / "I haven't been told".
+- If something is not stated:
+  - If it seems unrelated to why I'm here today, say: "I'm not sure that's relevant to this case."
+  - If it seems clinically relevant but isn't stated, say: "I'm not sure" / "I don't know, I'm afraid".
 - NEVER substitute another symptom.
 - NEVER create symptoms.
 - Do Not Hallucinate.
@@ -767,7 +769,9 @@ B) For ANY vague/open question (including "anything else?"):
    - Then STOP. Do not add extra details.
 
 C) Only reveal information from "DIVULGE ONLY IF ASKED" when a direct question matches it.
-   If not directly asked, say: "I'm not sure" / "I haven't been told" / "I don't remember".
+   If not directly asked:
+   - If it seems unrelated to why I'm here today: "I'm sorry, I don't know; however, I'm sure that's not relevant to what's going on."
+   - If it seems relevant but isn't stated: "I don't know, I'm afraid."
 
 D) Never expand into PMHx / social / family / ICE unless directly asked about those topics.
 
