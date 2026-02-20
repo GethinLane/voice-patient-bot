@@ -51,6 +51,8 @@ from pipecat.services.inworld.tts import InworldHttpTTSService
 from pipecat.transcriptions.language import Language as TranscriptLanguage
 
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.assemblyai import AssemblyAISTTService
+from pipecat.services.assemblyai.models import AssemblyAIConnectionParams
 from pipecat.services.openai.llm import OpenAILLMService
 
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -454,6 +456,141 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
         
     raise RuntimeError(f"Unknown TTS provider: {provider}")
 
+# ----------------------- STT PROVIDER SELECTION + FAILOVER (PRIMARY/SECONDARY) -----------------------
+
+_STT_COOLDOWN_UNTIL = {}  # provider -> unix time until which we should avoid it
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _cooldown_secs() -> int:
+    try:
+        return int(os.getenv("STT_FAILOVER_COOLDOWN_SECS") or "60")
+    except Exception:
+        return 60
+
+
+def _set_cooldown(provider: str):
+    if provider:
+        _STT_COOLDOWN_UNTIL[provider] = _now() + _cooldown_secs()
+
+
+def _in_cooldown(provider: str) -> bool:
+    if not provider:
+        return False
+    until = _STT_COOLDOWN_UNTIL.get(provider)
+    return bool(until and until > _now())
+
+
+def _get_primary_secondary() -> tuple[str, str]:
+    """
+    Env-driven selection.
+      STT_FORCE_PROVIDER (optional) overrides everything for testing.
+      STT_PRIMARY / STT_SECONDARY are the normal controls.
+    """
+    forced = (os.getenv("STT_FORCE_PROVIDER") or "").strip().lower()
+    if forced:
+        return forced, ""
+
+    primary = (os.getenv("STT_PRIMARY") or "deepgram").strip().lower()
+    secondary = (os.getenv("STT_SECONDARY") or "assemblyai").strip().lower()
+
+    if secondary == primary:
+        secondary = ""
+
+    return primary, secondary
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    s = (str(exc) or "").lower()
+    return any(tok in s for tok in [
+        "timeout", "timed out",
+        "service unavailable", "temporarily unavailable", "503",
+        "connection reset", "connection refused",
+        "disconnected",
+        "cannot connect",
+        "websocket",
+        "network is unreachable",
+    ])
+
+
+def _is_capacity_error(provider: str, exc: Exception) -> bool:
+    """
+    Match common capacity/rate-limit signals.
+    We match on text because Pipecat may wrap underlying exceptions.
+    """
+    p = (provider or "").lower()
+    s = (str(exc) or "").lower()
+
+    if p in ("deepgram", "dg"):
+        # Rate limiting/capacity typically: 429 / TOO_MANY_REQUESTS
+        return (
+            "429" in s
+            or "too many requests" in s
+            or "too_many_requests" in s
+            or "rate limit" in s
+        )
+
+    if p in ("assemblyai", "aai"):
+        # Concurrency limit often: WS close code 1008 + "Too many concurrent sessions"
+        return (
+            ("1008" in s and "too many concurrent sessions" in s)
+            or ("too many concurrent sessions" in s)
+        )
+
+    return False
+
+
+def _should_failover(provider: str, exc: Exception) -> bool:
+    return _is_capacity_error(provider, exc) or _is_transient_network_error(exc)
+
+
+def _build_stt_service(provider: str):
+    provider = (provider or "").strip().lower()
+
+    if provider in ("deepgram", "dg"):
+        api_key = (os.getenv("DEEPGRAM_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("Missing DEEPGRAM_API_KEY (STT provider=deepgram)")
+        return DeepgramSTTService(api_key=api_key)
+
+    if provider in ("assemblyai", "aai"):
+        api_key = (os.getenv("ASSEMBLYAI_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("Missing ASSEMBLYAI_API_KEY (STT provider=assemblyai)")
+
+        return AssemblyAISTTService(
+            api_key=api_key,
+            connection_params=AssemblyAIConnectionParams(
+                sample_rate=16000,
+                formatted_finals=True,
+            ),
+            # Keep your existing SmartTurn + Silero VAD as the turn controller:
+            vad_force_turn_endpoint=True,
+        )
+
+    raise RuntimeError(f"Unknown STT provider: {provider!r}")
+
+
+def choose_stt_primary_first() -> tuple[object, str, str]:
+    """
+    Returns: (stt_service, provider_in_use, other_provider)
+    Uses cooldown to skip a provider that just rate-limited / errored.
+    """
+    primary, secondary = _get_primary_secondary()
+
+    if primary and not _in_cooldown(primary):
+        return _build_stt_service(primary), primary, secondary
+
+    if secondary and not _in_cooldown(secondary):
+        logger.warning(f"⏭️ Primary STT in cooldown; using secondary={secondary}")
+        return _build_stt_service(secondary), secondary, primary
+
+    # If both are in cooldown, just retry primary
+    logger.warning("⚠️ Both STT providers appear in cooldown; retrying primary anyway.")
+    return _build_stt_service(primary), primary, secondary
 
 # ----------------------- MAIN BOT -----------------------
 
@@ -480,7 +617,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
     # STT / LLM / TTS
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt, stt_provider_in_use, stt_other = choose_stt_primary_first()
+    logger.info(f"🎙️ STT selected: {stt_provider_in_use} (secondary={stt_other or 'none'})")
 
     # Ensure Google credentials exist before any Google client init
     _ensure_google_adc()
@@ -787,9 +925,47 @@ Hard style rules (must follow):
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+
     try:
         await runner.run(task)
+
+    except Exception as e:
+        logger.error(f"❌ Pipeline error (stt={stt_provider_in_use}): {e}")
+
+        if stt_other and _should_failover(stt_provider_in_use, e):
+            # Put the failing provider in cooldown so new sessions skip it briefly
+            _set_cooldown(stt_provider_in_use)
+
+            logger.warning(
+                f"🔁 STT failover: {stt_provider_in_use} -> {stt_other} (reason={e})"
+            )
+
+            # Rebuild STT + pipeline/task with the other provider
+            stt_provider_in_use, stt_other = stt_other, stt_provider_in_use
+            stt = _build_stt_service(stt_provider_in_use)
+
+            pipeline = Pipeline(
+                [
+                    transport.input(),
+                    stt,
+                    user_aggregator,
+                    llm,
+                    tts,
+                    transport.output(),
+                    assistant_aggregator,
+                ]
+            )
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+            )
+
+            runner2 = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+            await runner2.run(task)
+
+        else:
+            raise
+
     finally:
         await _close_aiohttp_session()
 
