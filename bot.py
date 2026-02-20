@@ -114,7 +114,7 @@ logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
-BOT_VERSION = "2026-02-20-change-SST-to-2-providers-v1"
+BOT_VERSION = "2026-02-20-elevenlabs-v2"
 logger.info(f"✅ BOT_VERSION={BOT_VERSION}")
 
 # Where to submit transcript for grading (ONLY on disconnect)
@@ -354,7 +354,7 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
         api_key = os.getenv("ELEVENLABS_API_KEY")
         if not api_key:
             raise RuntimeError("ELEVENLABS_API_KEY missing (provider=elevenlabs)")
-    
+
         voice_id = voice or os.getenv("ELEVENLABS_VOICE_ID")
         if not voice_id:
             raise RuntimeError(
@@ -366,11 +366,15 @@ def _build_tts_from_body(body: dict, aiohttp_session=None):
 
         # IMPORTANT: force a playable format for Daily/WebRTC
         # 48000 is the safest default for WebRTC pipelines.
+        logger.info(
+            f"🔊 ElevenLabs TTS init: voice_id={voice_id!r}, model_id={model_id!r}, sample_rate=48000"
+        )
+
         return ElevenLabsTTSService(
             api_key=api_key,
             voice_id=voice_id,
             model=model_id,
-            sample_rate=24000,
+            sample_rate=48000,  # ✅ match WebRTC output rate to avoid resample stutter
             # Turn on internal service logging (supported by Pipecat)
             params=ElevenLabsTTSService.InputParams(enable_logging=True),
         )
