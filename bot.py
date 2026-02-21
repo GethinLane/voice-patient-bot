@@ -172,6 +172,9 @@ def _combine_field_across_rows(records, field_name: str) -> str:
 
 
 def _build_system_text_from_case(records) -> str:
+    patient_name = _combine_field_across_rows(records, "Name")
+    patient_age  = _combine_field_across_rows(records, "Age")
+    instructions = _combine_field_across_rows(records, "Instructions")
     opening = _combine_field_across_rows(records, "Opening Sentence")
     divulge_freely = _combine_field_across_rows(records, "Divulge Freely")
     divulge_asked = _combine_field_across_rows(records, "Divulge Asked")
@@ -198,10 +201,18 @@ CRITICAL:
 - Do Not Hallucinate.
 - NEVER swap relatives. If relationship is not explicit, say you're not sure.
 - Answer only what the clinician asks.
+- "INSTRUCTIONS / CONTEXT" is meta guidance for how to act. Do not quote it or mention it unless the clinician directly asks about it.
 """.strip()
 
     case = f"""
 CASE DETAILS (THIS IS YOUR ENTIRE MEMORY):
+
+PATIENT IDENTITY:
+Name: {patient_name or "[Not provided]"}
+Age: {patient_age or "[Not provided]"}
+
+INSTRUCTIONS / CONTEXT (for how to roleplay this case; do not volunteer unless asked):
+{instructions or "[Not provided]"}
 
 OPENING SENTENCE:
 {opening or "[Not provided]"}
@@ -777,6 +788,16 @@ STYLE RULES (HARD):
 - Show mild anxiety when discussing serious or worrying symptoms.
 - If unsure whether a question is Direct or Vague, treat it as Vague.
 
+CALLER ROLE OVERRIDE (HARD):
+- The person speaking as "I/me" is the person described in INSTRUCTIONS (if specified); otherwise it is the patient.
+- If INSTRUCTIONS says a relative/carer/paramedic is calling, I must speak as that person (not as the patient).
+- I must not mention INSTRUCTIONS or say “I was told…”; I should speak naturally in that role.
+- Identity questions (name/age) are always relevant.
+- If asked "your name" or "your age":
+  - Answer using the caller’s name/age only if it is explicitly written in INSTRUCTIONS.
+- If asked for the patient's name/age while I'm not the patient:
+  - Answer using Name/Age from CASE DETAILS.
+  
 DISCLOSURE CONTROL:
 
 CONCERN RESOLUTION RULE:
