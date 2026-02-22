@@ -64,48 +64,150 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 class SafeInworldHttpTTSService(InworldHttpTTSService):
-    async def _process_streaming_response(self, response: aiohttp.ClientResponse, context_id: str):
-        buffer = b""
+    """
+    Robust parser for Inworld HTTP streaming TTS responses.
+
+    Handles:
+      - NDJSON framing (one JSON object per line)
+      - SSE framing ("data: {json}\n\n")
+      - Arbitrary chunk boundaries (never decodes partial UTF-8)
+      - Trailing partial frames (flush at end)
+      - UnicodeDecodeError / JSONDecodeError without killing the stream
+    """
+
+    async def _process_streaming_response(
+        self, response: aiohttp.ClientResponse, context_id: str
+    ):
+        import json
+        import base64
+
+        # Incremental UTF-8 decoder prevents split-multibyte crashes across chunks
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        text_buffer = ""  # decoded text buffered until we have complete frames
+
         utterance_duration = 0.0
 
+        async def handle_json_obj(obj: dict):
+            nonlocal utterance_duration
+
+            # Stream objects may contain "result" or "error"
+            result = obj.get("result") or {}
+
+            # If Inworld emits an "error" object mid-stream, log it but don't crash
+            err = obj.get("error")
+            if err:
+                logger.warning(f"Inworld stream error object: {err}")
+
+            audio_b64 = result.get("audioContent")
+            if audio_b64:
+                await self.stop_ttfb_metrics()
+                audio_bytes = base64.b64decode(audio_b64)
+                async for frame in self._process_audio_chunk(audio_bytes, context_id):
+                    yield frame
+
+            timestamp_info = result.get("timestampInfo")
+            if timestamp_info:
+                word_times, chunk_end_time = self._calculate_word_times(timestamp_info)
+                if word_times:
+                    await self.add_word_timestamps(word_times, context_id)
+                utterance_duration = max(utterance_duration, chunk_end_time)
+
+        async def process_frame_text(frame_text: str):
+            """
+            Process one frame of text that should represent a JSON object,
+            or a set of lines containing SSE fields.
+            """
+            frame_text = frame_text.strip()
+            if not frame_text:
+                return
+
+            # SSE: can be "data: {json}" (possibly multi-line), separated by blank line
+            # Combine all data: lines into one JSON payload if present
+            if "data:" in frame_text:
+                data_lines = []
+                for line in frame_text.splitlines():
+                    line = line.strip()
+                    if line.startswith("data:"):
+                        data_lines.append(line[len("data:") :].strip())
+                if data_lines:
+                    payload = "\n".join(data_lines).strip()
+                else:
+                    payload = frame_text
+            else:
+                # NDJSON line: should be a JSON object
+                payload = frame_text
+
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                # Not a complete/valid JSON object; ignore (stream sometimes sends keepalives)
+                return
+
+            async for out in handle_json_obj(obj):
+                yield out
+
+        async def drain_complete_frames():
+            """
+            Pull complete frames from text_buffer and process them.
+            We support two framing modes:
+              - NDJSON: frames separated by '\n' (one JSON per line)
+              - SSE: frames separated by '\n\n' (blank line delimiter)
+            We'll prioritize SSE framing if we detect 'data:'.
+            """
+            nonlocal text_buffer
+
+            while True:
+                if "data:" in text_buffer:
+                    # SSE framing: events are separated by blank line
+                    sep = "\n\n"
+                else:
+                    # NDJSON framing: one JSON per line
+                    sep = "\n"
+
+                idx = text_buffer.find(sep)
+                if idx < 0:
+                    return
+
+                frame = text_buffer[:idx]
+                text_buffer = text_buffer[idx + len(sep) :]
+
+                async for out in process_frame_text(frame):
+                    yield out
+
+        # Stream loop
         async for chunk in response.content.iter_chunked(4096):
             if not chunk:
                 continue
 
-            buffer += chunk
+            # Decode chunk incrementally (never throws for split multibyte chars)
+            try:
+                text_buffer += decoder.decode(chunk)
+            except UnicodeDecodeError as e:
+                logger.warning(f"Inworld stream UTF-8 decode error (chunk skipped): {e}")
+                continue
 
-            # Process complete newline-delimited JSON records
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
+            # Drain any complete frames now available
+            async for out in drain_complete_frames():
+                yield out
 
-                # Decode ONLY a full line (prevents split-multibyte UTF-8 crashes)
-                line_str = line.decode("utf-8", errors="strict")
+        # End of stream: flush decoder + process remaining buffered text
+        try:
+            text_buffer += decoder.decode(b"", final=True)
+        except UnicodeDecodeError as e:
+            logger.warning(f"Inworld stream UTF-8 final decode error: {e}")
 
-                try:
-                    chunk_data = json.loads(line_str)
-                except json.JSONDecodeError:
-                    continue
+        # Try to process whatever is left as one last frame (best-effort)
+        leftover = text_buffer.strip()
+        if leftover:
+            # If it still contains multiple frames, drain them
+            async for out in drain_complete_frames():
+                yield out
 
-                result = chunk_data.get("result") or {}
-
-                audio_b64 = result.get("audioContent")
-                if audio_b64:
-                    await self.stop_ttfb_metrics()
-                    async for frame in self._process_audio_chunk(
-                        base64.b64decode(audio_b64),
-                        context_id,
-                    ):
-                        yield frame
-
-                timestamp_info = result.get("timestampInfo")
-                if timestamp_info:
-                    word_times, chunk_end_time = self._calculate_word_times(timestamp_info)
-                    if word_times:
-                        await self.add_word_timestamps(word_times, context_id)
-                    utterance_duration = max(utterance_duration, chunk_end_time)
+            # And then attempt the remaining tail as a single frame
+            tail = text_buffer.strip()
+            if tail:
+                async for out in process_frame_text(tail):
+                    yield out
 
         if utterance_duration > 0:
             self._cumulative_time += utterance_duration
