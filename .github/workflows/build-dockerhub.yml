@@ -10,9 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
@@ -27,5 +25,7 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/voice-patient-bot:latest
           provenance: false
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/voice-patient-bot:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/voice-patient-bot:${{ github.sha }}
