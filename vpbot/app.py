@@ -1,7 +1,9 @@
 # vpbot/app.py
+
 import os
+import re
 import json
-import time
+import time  # used to measure session duration
 import threading
 import aiohttp
 from loguru import logger
@@ -30,16 +32,20 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
+
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.openai.llm import OpenAILLMService
+
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
-from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
 from pipecat.turns.user_turn_strategies import UserTurnStrategies, ExternalUserTurnStrategies
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 
-from vpbot.config import BOT_VERSION, GRADING_SUBMIT_URL  # noqa: F401
+from vpbot.config import BOT_VERSION, GRADING_SUBMIT_URL
 from vpbot.google_adc import ensure_google_adc
 from vpbot.airtable_case import fetch_case_system_text, extract_opening_sentence
 from vpbot.transcript import build_transcript_from_context, submit_grading
@@ -50,12 +56,18 @@ from vpbot.stt import (
     set_cooldown,
     build_stt_service,
 )
+from vpbot.policy import build_disclosure_policy
+
 
 logger.info("✅ All components loaded successfully!")
+
+
+# ----------------------- MAIN BOT -----------------------
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting bot")
 
+    # Session body from Vercel (fast, no network)
     body = getattr(runner_args, "body", None) or {}
     logger.info(f"📥 runner_args.body={body}")
 
@@ -70,8 +82,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         or (body.get("meta") or {}).get("mode")
         or (body.get("context") or {}).get("mode")
     )
+
     logger.info(f"🧩 Session mode resolved: {mode}")
 
+    # STT / LLM / TTS
     logger.info(
         "🔎 STT env check: "
         f"STT_FORCE_PROVIDER={os.getenv('STT_FORCE_PROVIDER')!r} "
@@ -85,6 +99,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     use_flux_turns = stt_provider_in_use in ("deepgram", "dg")
     logger.info(f"🎙️ STT selected: {stt_provider_in_use} (secondary={stt_other or 'none'})")
 
+    # Ensure Google credentials exist before any Google client init
     ensure_google_adc()
 
     aiohttp_session = None
@@ -98,6 +113,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             logger.warning(f"Failed to close aiohttp session: {e}")
         aiohttp_session = None
 
+    # ✅ Make TTS selection loud + safe
     try:
         logger.info(f"🔊 Requested TTS config: {json.dumps(body.get('tts'), ensure_ascii=False)}")
 
@@ -105,6 +121,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         if isinstance(body.get("tts"), dict):
             tts_provider = str(body["tts"].get("provider", "")).strip().lower()
 
+        # Only create aiohttp session if we actually need it
         if tts_provider == "inworld":
             aiohttp_session = aiohttp.ClientSession()
 
@@ -113,7 +130,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
         tts = build_tts_from_body(body, aiohttp_session=aiohttp_session)
 
-        # diagnostics (kept)
+        # 🔍 DIAGNOSTIC: prove which code + pipecat/inworld version this agent is actually running
         import inspect
         import pipecat
         from pipecat.services.inworld.tts import InworldHttpTTSService
@@ -124,12 +141,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info(f"🔍 InworldHttpTTSService file={inspect.getfile(InworldHttpTTSService)}")
         logger.info(f"🔍 TTS impl={tts.__class__.__module__}.{tts.__class__.__name__}")
         logger.info(f"🔍 runner_args.body.tts={body.get('tts')}")
+
         logger.info(f"TTS class = {tts.__class__.__module__}.{tts.__class__.__name__}")
 
     except Exception as e:
         logger.error(f"❌ TTS init failed ({body.get('tts')}): {e}")
         logger.error("↩️ Falling back to Cartesia so session can continue")
 
+        # If we created an aiohttp session, close it on failure
         try:
             if aiohttp_session is not None and not aiohttp_session.closed:
                 await aiohttp_session.close()
@@ -142,6 +161,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             voice_id=os.getenv("CARTESIA_VOICE_ID") or "71a7ad14-091c-4e8e-a314-022ece01c121",
         )
 
+    # --- LLM MODEL SELECTION (strict, conversation-specific; no fallback) ---
     ENV_STD = "OPENAI_CONVERSATION_MODEL_STANDARD"
     ENV_PREM = "OPENAI_CONVERSATION_MODEL_PREMIUM"
 
@@ -150,34 +170,48 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     if mode == "premium":
         if not premium_model:
-            raise RuntimeError(f"Missing required env var: {ENV_PREM} (e.g. set it to 'gpt-5.1').")
+            raise RuntimeError(
+                f"Missing required env var: {ENV_PREM} "
+                "(e.g. set it to 'gpt-5.1')."
+            )
         selected_model = premium_model
         selected_env = ENV_PREM
     else:
         if not standard_model:
-            raise RuntimeError(f"Missing required env var: {ENV_STD} (e.g. set it to 'gpt-4.1-mini').")
+            raise RuntimeError(
+                f"Missing required env var: {ENV_STD} "
+                "(e.g. set it to 'gpt-4.1-mini')."
+            )
         selected_model = standard_model
         selected_env = ENV_STD
 
-    logger.info(f"🧠 OpenAI conversation model selected: {selected_model} (mode={mode}, env={selected_env})")
+    logger.info(
+        f"🧠 OpenAI conversation model selected: {selected_model} "
+        f"(mode={mode}, env={selected_env})"
+    )
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
         model=selected_model,
     )
 
+    # Case selection from session body
     case_id = int(body.get("caseId") or os.getenv("CASE_ID", "1"))
 
+    # Identity passthrough
     user_id = (body.get("userId") or "").strip() or None
     email = (body.get("email") or "").strip().lower() or None
 
+    # Tone passthrough (optional)
     start_tone = (body.get("startTone") or "neutral").strip().lower()
     tone_intensity = (body.get("toneIntensity") or "").strip().lower()
 
     logger.info(f"📘 Using case_id={case_id} (userId={user_id}, email={email}, startTone={start_tone})")
 
+    # Session timing
     connected_at = None
 
+    # Fetch case prompt from Airtable once at startup
     try:
         system_text = fetch_case_system_text(case_id)
         logger.info(f"✅ Loaded Airtable system prompt for Case {case_id}")
@@ -189,8 +223,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         )
 
     opening_sentence = extract_opening_sentence(system_text)
-
-    from vpbot.policy import build_disclosure_policy
 
     disclosure_policy = build_disclosure_policy(start_tone, tone_intensity)
 
@@ -212,24 +244,41 @@ You are simulating a real patient in a clinical consultation.
         user_turn_strategies = ExternalUserTurnStrategies()
     else:
         user_turn_strategies = UserTurnStrategies(
-            start=[MinWordsUserTurnStartStrategy(min_words=2)],
+            start=[
+                MinWordsUserTurnStartStrategy(min_words=2),
+            ],
             stop=[
                 TurnAnalyzerUserTurnStopStrategy(
-                    turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=1.0))
+                    turn_analyzer=LocalSmartTurnAnalyzerV3(
+                        params=SmartTurnParams(stop_secs=1.0)
+                    )
                 )
             ],
         )
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(user_turn_strategies=user_turn_strategies),
+        user_params=LLMUserAggregatorParams(
+            user_turn_strategies=user_turn_strategies,
+        ),
     )
 
     pipeline = Pipeline(
-        [transport.input(), stt, user_aggregator, llm, tts, transport.output(), assistant_aggregator]
+        [
+            transport.input(),
+            stt,
+            user_aggregator,
+            llm,
+            tts,
+            transport.output(),
+            assistant_aggregator,
+        ]
     )
 
-    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, enable_usage_metrics=True))
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+    )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -264,6 +313,7 @@ You are simulating a real patient in a clinical consultation.
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
 
+        # duration seconds
         duration_seconds = None
         try:
             if connected_at is not None:
@@ -292,6 +342,7 @@ You are simulating a real patient in a clinical consultation.
                 "transcript": transcript,
             }
 
+            # Fire-and-forget background submit
             try:
                 logger.info(f"📤 Queueing transcript submit to {GRADING_SUBMIT_URL}")
                 th = threading.Thread(
@@ -309,28 +360,47 @@ You are simulating a real patient in a clinical consultation.
 
     try:
         await runner.run(task)
+
     except Exception as e:
         logger.error(f"❌ Pipeline error (stt={stt_provider_in_use}): {e}")
 
         if stt_other and should_failover(stt_provider_in_use, e):
+            # Put the failing provider in cooldown so new sessions skip it briefly
             set_cooldown(stt_provider_in_use)
 
-            logger.warning(f"🔁 STT failover: {stt_provider_in_use} -> {stt_other} (reason={e})")
+            logger.warning(
+                f"🔁 STT failover: {stt_provider_in_use} -> {stt_other} (reason={e})"
+            )
 
+            # Rebuild STT + pipeline/task with the other provider
             stt_provider_in_use, stt_other = stt_other, stt_provider_in_use
             stt = build_stt_service(stt_provider_in_use)
 
             pipeline = Pipeline(
-                [transport.input(), stt, user_aggregator, llm, tts, transport.output(), assistant_aggregator]
+                [
+                    transport.input(),
+                    stt,
+                    user_aggregator,
+                    llm,
+                    tts,
+                    transport.output(),
+                    assistant_aggregator,
+                ]
             )
-            task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, enable_usage_metrics=True))
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+            )
 
             runner2 = PipelineRunner(handle_sigint=runner_args.handle_sigint)
             await runner2.run(task)
+
         else:
             raise
+
     finally:
         await _close_aiohttp_session()
+
 
 async def bot(runner_args: RunnerArguments):
     def _peek_provider_from_env() -> str:
@@ -356,13 +426,15 @@ async def bot(runner_args: RunnerArguments):
     transport_params = {
         "daily": lambda: DailyParams(
             audio_in_enabled=True,
-            audio_in_filter=KrispVivaFilter(),
+            audio_in_filter=KrispVivaFilter(),  # ✅ Krisp VIVA mic filter
             audio_out_enabled=True,
+            # ✅ Keep VAD for AssemblyAI, disable for Flux
             vad_analyzer=None if use_flux else _silero_vad(),
         ),
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            # ✅ Keep VAD for AssemblyAI, disable for Flux
             vad_analyzer=None if use_flux else _silero_vad(),
         ),
     }
