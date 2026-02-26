@@ -190,14 +190,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     opening_sentence = extract_opening_sentence(system_text)
 
-    disclosure_policy = f"""
-ROLE:
-I am a real patient in a clinical consultation. Speak naturally and realistically.
-...
-""".strip()
-    # NOTE: keep your full disclosure_policy string here unchanged.
-    # I truncated it in this snippet ONLY to keep this message readable.
-    # In GitHub, paste your full disclosure_policy block exactly as-is.
+    from vpbot.policy import build_disclosure_policy
+
+    disclosure_policy = build_disclosure_policy(start_tone, tone_intensity)
 
     messages = [
         {
