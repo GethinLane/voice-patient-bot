@@ -41,6 +41,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
+from pipecat.turns.user_mute import FirstBotSpeechUserMuteStrategy
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsHttpTTSService
@@ -1073,7 +1074,9 @@ You are simulating a real patient in a clinical consultation.
     context = LLMContext(messages)
 
     if use_flux_turns:
-        user_turn_strategies = ExternalUserTurnStrategies()
+        user_turn_strategies = ExternalUserTurnStrategies(
+            mute=[FirstBotSpeechUserMuteStrategy()],
+        )
     else:
         user_turn_strategies = UserTurnStrategies(
             start=[
@@ -1257,7 +1260,7 @@ async def bot(runner_args: RunnerArguments):
     )
 
     primary_provider, _secondary_provider = _get_primary_secondary_for_mode(mode)
-    use_flux = primary_provider in ("deepgram", "dg", "assemblyai", "aai")
+    use_flux = primary_provider in ("deepgram", "dg")
 
     def _silero_vad():
         return SileroVADAnalyzer(
