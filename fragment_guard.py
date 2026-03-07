@@ -304,6 +304,8 @@ class FragmentGuard(FrameProcessor):
             return False
 
     async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, LLMRunFrame) and direction == FrameDirection.DOWNSTREAM:
             # Expire old fragments first
             self._expire_stale_fragments()
