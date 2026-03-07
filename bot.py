@@ -41,7 +41,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.turns.user_mute import FirstBotSpeechUserMuteStrategy
+from pipecat.turns.user_mute import FirstSpeechUserMuteStrategy
 
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService, ElevenLabsHttpTTSService
@@ -1075,7 +1075,7 @@ You are simulating a real patient in a clinical consultation.
 
     if use_flux_turns:
         user_turn_strategies = ExternalUserTurnStrategies(
-            mute=[FirstBotSpeechUserMuteStrategy()],
+            mute=[FirstSpeechUserMuteStrategy()],
         )
     else:
         user_turn_strategies = UserTurnStrategies(
