@@ -18,3 +18,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Copy app code
 COPY ./bot.py ./bot.py
+COPY ./fragment_guard.py ./fragment_guard.py
