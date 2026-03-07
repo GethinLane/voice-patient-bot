@@ -1074,9 +1074,7 @@ You are simulating a real patient in a clinical consultation.
     context = LLMContext(messages)
 
     if use_flux_turns:
-        user_turn_strategies = ExternalUserTurnStrategies(
-            mute=[FirstSpeechUserMuteStrategy()],
-        )
+        user_turn_strategies = ExternalUserTurnStrategies()
     else:
         user_turn_strategies = UserTurnStrategies(
             start=[
@@ -1095,6 +1093,7 @@ You are simulating a real patient in a clinical consultation.
         context,
         user_params=LLMUserAggregatorParams(
             user_turn_strategies=user_turn_strategies,
+            user_mute_strategies=[FirstSpeechUserMuteStrategy()],
         ),
     )
 
