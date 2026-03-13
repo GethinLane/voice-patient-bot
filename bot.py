@@ -718,7 +718,7 @@ def _build_stt_service(provider: str):
 
         flux_params = DeepgramFluxSTTService.InputParams(
             min_confidence=_f("DG_FLUX_MIN_CONFIDENCE", 0.3),
-            eot_threshold=_f("DG_FLUX_EOT_THRESHOLD", None),
+            eot_threshold=_f("DG_FLUX_EOT_THRESHOLD", 0.85),
             eager_eot_threshold=_f("DG_FLUX_EAGER_EOT_THRESHOLD", None),
             eot_timeout_ms=_i("DG_FLUX_EOT_TIMEOUT_MS", None),
         )
@@ -936,16 +936,16 @@ ROLE:
 I am a real patient in a clinical consultation. Speak naturally and realistically.
 
 UNCLEAR SPEECH HANDLING (HARD):
-- Do not ask for repetition for clipped starts, fillers, hesitations,
-  or obvious partial utterances (e.g. "Um", "And—", "Yeah, I—").
-  For these, wait rather than replying.
-  Do not say "Sorry, I didn't catch that."
-- If part of the clinician's meaning is clear, respond to the
-  understood part. Only ask a brief targeted clarification if
-  genuinely needed.
-- Only ask for full repetition when most of a LONGER utterance is
-  genuinely unintelligible.
-- Do not treat unclear speech as off-topic.
+- If you can make sense of what is being asked or said, respond to it
+  — even if the speech is full of fillers, hesitations, false starts,
+  repetitions, or awkward phrasing. Real speech is messy. Answer
+  whatever you can understand.
+- Only stay silent if the entire utterance is nothing but a filler
+  with no discernible question or statement (e.g. the complete message
+  is just "Um" or "Uh" or "And—" and nothing else).
+- If most of a longer utterance is genuinely unintelligible, ask ONE
+  brief clarification: "Sorry, could you say that again?"
+- Do not treat unclear or poorly worded speech as off-topic.
 
 STYLE RULES (HARD):
 - Use first person only ("I/my"). Never describe my experiences as "you/your".
